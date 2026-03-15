@@ -245,22 +245,41 @@ GENERATED_DIR = "generated_chars"
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(GENERATED_DIR, exist_ok=True)
 
-def cached_мdownload(url: str) -> str:
+def cached_download(url: str) -> str:
     ext = os.path.splitext(url.split("?")[0])[1] or ".img"
     name = hashlib.md5(url.encode("utf-8")).hexdigest() + ext
     path = os.path.join(CACHE_DIR, name)
+
     if os.path.exists(path):
         return path
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-    with open(path, "wb") as f:
-        f.write(response.content)
-    return path
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    for attempt in range(3):
+        try:
+            response = requests.get(url, timeout=20, headers=headers)
+            response.raise_for_status()
+
+            with open(path, "wb") as f:
+                f.write(response.content)
+
+            return path
+
+        except Exception as e:
+            logging.warning(f"Download failed {url} attempt {attempt+1}: {e}")
+            time.sleep(1)
+
+    raise Exception(f"Failed to download image: {url}")
 
 def open_rgba(url: str) -> Image.Image:
-    path = cached_download(url)
-    return Image.open(path).convert("RGBA")
-
+    try:
+        path = cached_download(url)
+        return Image.open(path).convert("RGBA")
+    except Exception as e:
+        logging.error(f"Image load failed: {url} {e}")
+        return Image.new("RGBA", (512,512), (0,0,0,0))
 def get_top_meta(key: str):
     for item in CHAR_TOPS:
         if item["key"] == key:
