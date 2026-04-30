@@ -6,6 +6,9 @@ import asyncio
 import time
 import os
 import hashlib
+import json
+import math
+import re
 
 import requests
 from PIL import Image
@@ -346,6 +349,41 @@ ensure_column("players", "bank_btc REAL DEFAULT 0")
 ensure_column("players", "account_number TEXT DEFAULT ''")
 ensure_column("car_market", "seller_name TEXT DEFAULT ''")
 ensure_column("players", "current_house_id INTEGER DEFAULT 0")
+# --- Logistics additions ---
+ensure_column("players", "logistics_level INTEGER DEFAULT 1")
+ensure_column("players", "logistics_done INTEGER DEFAULT 0")
+ensure_column("players", "logistics_rent_truck TEXT DEFAULT ''")
+ensure_column("players", "logistics_rent_remaining INTEGER DEFAULT 0")
+
+ensure_column("garage", "vehicle_type TEXT DEFAULT 'car'")
+ensure_column("garage", "truck_level INTEGER DEFAULT 0")
+ensure_column("garage", "cargo_capacity INTEGER DEFAULT 0")
+ensure_column("garage", "speed_bonus_percent INTEGER DEFAULT 0")
+ensure_column("garage", "capacity_bonus_percent INTEGER DEFAULT 0")
+
+ensure_column("car_market", "vehicle_type TEXT DEFAULT 'car'")
+ensure_column("car_market", "truck_level INTEGER DEFAULT 0")
+ensure_column("car_market", "cargo_capacity INTEGER DEFAULT 0")
+ensure_column("car_market", "speed_bonus_percent INTEGER DEFAULT 0")
+ensure_column("car_market", "capacity_bonus_percent INTEGER DEFAULT 0")
+
+ensure_column("gpu_factory_orders", "owner_name TEXT DEFAULT ''")
+ensure_column("gpu_factory_orders", "driver_id INTEGER DEFAULT 0")
+ensure_column("gpu_factory_orders", "driver_name TEXT DEFAULT ''")
+ensure_column("gpu_factory_orders", "driver_type TEXT DEFAULT ''")
+ensure_column("gpu_factory_orders", "vehicle_name TEXT DEFAULT ''")
+ensure_column("gpu_factory_orders", "vehicle_type TEXT DEFAULT ''")
+ensure_column("gpu_factory_orders", "vehicle_speed REAL DEFAULT 0")
+ensure_column("gpu_factory_orders", "vehicle_capacity INTEGER DEFAULT 0")
+ensure_column("gpu_factory_orders", "cargo_weight INTEGER DEFAULT 0")
+ensure_column("gpu_factory_orders", "delivery_started_at INTEGER DEFAULT 0")
+ensure_column("gpu_factory_orders", "delivery_eta_seconds INTEGER DEFAULT 0")
+ensure_column("gpu_factory_orders", "reward_amount INTEGER DEFAULT 0")
+ensure_column("gpu_factory_orders", "start_notice_chat_id INTEGER DEFAULT 0")
+ensure_column("gpu_factory_orders", "start_notice_message_id INTEGER DEFAULT 0")
+ensure_column("gpu_factory_orders", "tip_amount INTEGER DEFAULT 0")
+ensure_column("gpu_factory_orders", "tip_message TEXT DEFAULT ''")
+ensure_column("gpu_factory_orders", "tip_created_at INTEGER DEFAULT 0")
 
 # ---------------- DATA ----------------
 
@@ -370,6 +408,35 @@ TAXI_RENTALS = [
     {"name": "Ford Crown Victoria", "speed": 1.05, "rent": 480, "level": 4, "img": "https://files.catbox.moe/7tpi8l.jpg"},
     {"name": "Peugeot 301", "speed": 1.15, "rent": 620, "level": 5, "img": "https://files.catbox.moe/7t4y7m.jpg"},
 ]
+
+LOGISTICS_TRUCKS = {
+    "Ford F-250": {
+        "class": "Грузовик", "price": 250000, "speed": 0.75, "race": 0,
+        "truck_level": 1, "cargo_capacity": 1200, "type": "truck",
+        "img": "https://file.garden/afLwMScUngz43jPg/IMG_20260428_204620_708.jpg",
+    },
+    "Chevrolet G-Series (G20)": {
+        "class": "Грузовик", "price": 520000, "speed": 0.85, "race": 0,
+        "truck_level": 2, "cargo_capacity": 2200, "type": "truck",
+        "img": "https://file.garden/afLwMScUngz43jPg/IMG_20260428_204622_959.jpg",
+    },
+    "Mack 939": {
+        "class": "Грузовик", "price": 950000, "speed": 0.95, "race": 0,
+        "truck_level": 3, "cargo_capacity": 3800, "type": "truck",
+        "img": "https://file.garden/afLwMScUngz43jPg/IMG_20260428_204616_696.jpg",
+    },
+    "Chevrolet Step-Van": {
+        "class": "Грузовик", "price": 1450000, "speed": 1.05, "race": 0,
+        "truck_level": 4, "cargo_capacity": 5600, "type": "truck",
+        "img": "https://file.garden/afLwMScUngz43jPg/IMG_20260428_204618_689.jpg",
+    },
+    "MAN TGX": {
+        "class": "Грузовик", "price": 2500000, "speed": 1.20, "race": 0,
+        "truck_level": 5, "cargo_capacity": 8500, "type": "truck",
+        "img": "https://file.garden/afLwMScUngz43jPg/IMG_20260428_204624_492.jpg",
+    },
+}
+CARS.update(LOGISTICS_TRUCKS)
 
 CITY_INDEX = {"Новоград": 1, "Инд-Сити": 2, "Форс-Сити": 3, "Вегаспорт": 4, "Пятый город": 5}
 ALL_CITIES = list(CITY_INDEX.keys())
@@ -470,6 +537,7 @@ STATE_PREFIXES = {
     "trade_money": "trade_money:",
     "trade_add_item": "trade_add_item:",
     "trade_add_item_amount": "trade_add_item_amount:",
+    "logistics_tip": "logistics_tip:",
 }
 
 
@@ -600,13 +668,17 @@ STARTER_ITEMS = [
     "gpu_3060",
     "gpu_4060",
     "gpu_5060",
+    "truck_speed_blueprint_b",
+    "truck_speed_blueprint_a",
+    "truck_speed_blueprint_s",
+    "truck_capacity_module_b",
+    "truck_capacity_module_a",
+    "truck_capacity_module_s",
 ]
 
-cursor.execute("SELECT COUNT(*) FROM dealership")
-if cursor.fetchone()[0] == 0:
-    for car in CARS:
-        cursor.execute("INSERT INTO dealership(car, stock) VALUES(?, ?)", (car, 500))
-    conn.commit()
+for car in CARS:
+    cursor.execute("INSERT OR IGNORE INTO dealership(car, stock) VALUES(?, ?)", (car, 500))
+conn.commit()
 
 mine_sessions = {}
 factory_sessions = {}
@@ -739,7 +811,8 @@ def ensure_player_items(uid: int):
 
 def get_player(uid: int):
     cursor.execute("""
-        SELECT user_id, city, money, taxi_level, taxi_rides, char_created, char_top, char_bottom, char_hair, bank_balance, bank_btc, account_number, current_house_id
+        SELECT user_id, city, money, taxi_level, taxi_rides, char_created, char_top, char_bottom, char_hair, bank_balance, bank_btc, account_number, current_house_id,
+               logistics_level, logistics_done, logistics_rent_truck, logistics_rent_remaining
         FROM players WHERE user_id=?
     """, (uid,))
     row = cursor.fetchone()
@@ -765,6 +838,10 @@ def get_player(uid: int):
             "bank_btc": 0.0,
             "account_number": account_number,
             "current_house_id": 0,
+            "logistics_level": 1,
+            "logistics_done": 0,
+            "logistics_rent_truck": "",
+            "logistics_rent_remaining": 0,
         }
 
     if not row[11]:
@@ -790,6 +867,10 @@ def get_player(uid: int):
         "bank_btc": float(row[10] or 0),
         "account_number": row[11] or "",
         "current_house_id": row[12] if len(row) > 12 else 0,
+        "logistics_level": row[13] if len(row) > 13 and row[13] else 1,
+        "logistics_done": row[14] if len(row) > 14 and row[14] else 0,
+        "logistics_rent_truck": row[15] if len(row) > 15 and row[15] else "",
+        "logistics_rent_remaining": row[16] if len(row) > 16 and row[16] else 0,
     }
 
 def get_money(uid: int) -> int:
@@ -1761,6 +1842,12 @@ async def inventory_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"RTX 3060: {get_item_amount(uid, 'gpu_3060')}\n"
         f"RTX 4060: {get_item_amount(uid, 'gpu_4060')}\n"
         f"RTX 5060: {get_item_amount(uid, 'gpu_5060')}\n"
+        f"Чертеж скорости B: {get_item_amount(uid, 'truck_speed_blueprint_b')}\n"
+        f"Чертеж скорости A: {get_item_amount(uid, 'truck_speed_blueprint_a')}\n"
+        f"Чертеж скорости S: {get_item_amount(uid, 'truck_speed_blueprint_s')}\n"
+        f"Модуль грузоподъемности B: {get_item_amount(uid, 'truck_capacity_module_b')}\n"
+        f"Модуль грузоподъемности A: {get_item_amount(uid, 'truck_capacity_module_a')}\n"
+        f"Модуль грузоподъемности S: {get_item_amount(uid, 'truck_capacity_module_s')}\n"
     )
     await render_text(query.message, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="main")]]))
 
@@ -1773,6 +1860,7 @@ async def work_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = [[InlineKeyboardButton("🚕 Таксист", callback_data="taxi_driver_menu")]]
     if city == "Новоград":
         buttons.insert(0, [InlineKeyboardButton("💼 Начальные работы", callback_data="starter_jobs")])
+    buttons.append([InlineKeyboardButton("🚚 Логистика", callback_data="logistics_menu")])
     buttons.append([InlineKeyboardButton("🧑‍🏭 Трудоустройство", callback_data="factory_jobs_menu")])
     buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="main")])
     await render_text(query.message, "💼 Работа", reply_markup=InlineKeyboardMarkup(buttons))
@@ -3012,6 +3100,12 @@ def item_label(item_key: str) -> str:
         "gpu_3060": "RTX 3060",
         "gpu_4060": "RTX 4060",
         "gpu_5060": "RTX 5060",
+        "truck_speed_blueprint_b": "Чертеж скорости B",
+        "truck_speed_blueprint_a": "Чертеж скорости A",
+        "truck_speed_blueprint_s": "Чертеж скорости S",
+        "truck_capacity_module_b": "Модуль грузоподъемности B",
+        "truck_capacity_module_a": "Модуль грузоподъемности A",
+        "truck_capacity_module_s": "Модуль грузоподъемности S",
     }
     return mapping.get(item_key, item_key)
 
@@ -3622,6 +3716,682 @@ async def trade_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("UPDATE trade_sessions SET status='cancelled' WHERE id=?", (sid,))
     conn.commit()
     await render_text(query.message, "Сделка отменена", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="house_guests")]]))
+
+
+# ---------------- LOGISTICS ----------------
+
+LOGISTICS_LEVEL_PERCENTS = [30, 33, 36, 39, 43, 46, 49, 52, 55, 58, 62, 65, 68, 71, 74, 77, 81, 84, 87, 90]
+LOGISTICS_LEVEL_THRESHOLDS = [0, 5, 15, 30, 50, 75, 105, 140, 180, 225, 275, 330, 390, 455, 525, 600, 680, 765, 855, 950]
+LOGISTICS_NPC_WAIT_SECONDS = 15 * 60
+LOGISTICS_RENT_TRIPS = 3
+LOGISTICS_RENT_DISCOUNT_POINTS = 15
+LOGISTICS_REWARD_CHANCE = 0.02
+LOGISTICS_ORIGIN_CITY = "Новоград"
+
+LOGISTICS_REWARD_ITEMS = [
+    ("truck_speed_blueprint_b", "Чертеж улучшения скорости B 🔵"),
+    ("truck_speed_blueprint_a", "Чертеж улучшения скорости A 🟣"),
+    ("truck_speed_blueprint_s", "Чертеж улучшения скорости S 🟡"),
+    ("truck_capacity_module_b", "Бонусный модуль грузоподъемности B 🔵"),
+    ("truck_capacity_module_a", "Бонусный модуль грузоподъемности A 🟣"),
+    ("truck_capacity_module_s", "Бонусный модуль грузоподъемности S 🟡"),
+]
+
+LOGISTICS_STATUS_LABELS = {
+    "pending": "ожидает логиста",
+    "accepted": "взят логистом",
+    "in_delivery": "в пути",
+    "delivered": "доставлен",
+    "npc_delivered": "выполнен NPC",
+}
+
+def clamp_logistics_level(level: int) -> int:
+    return max(1, min(20, int(level or 1)))
+
+def logistics_percent(level: int, rented: bool = False) -> int:
+    level = clamp_logistics_level(level)
+    percent = LOGISTICS_LEVEL_PERCENTS[level - 1]
+    if rented:
+        percent = max(1, percent - LOGISTICS_RENT_DISCOUNT_POINTS)
+    return percent
+
+def logistics_next_level_at(level: int):
+    level = clamp_logistics_level(level)
+    if level >= 20:
+        return None
+    return LOGISTICS_LEVEL_THRESHOLDS[level]
+
+def add_logistics_delivery(uid: int):
+    cursor.execute("UPDATE players SET logistics_done = logistics_done + 1 WHERE user_id=?", (uid,))
+    conn.commit()
+    cursor.execute("SELECT logistics_done, logistics_level FROM players WHERE user_id=?", (uid,))
+    done, level = cursor.fetchone()
+    new_level = clamp_logistics_level(level)
+    for i, threshold in enumerate(LOGISTICS_LEVEL_THRESHOLDS, start=1):
+        if done >= threshold:
+            new_level = i
+    new_level = clamp_logistics_level(new_level)
+    if new_level != level:
+        cursor.execute("UPDATE players SET logistics_level=? WHERE user_id=?", (new_level, uid))
+        conn.commit()
+        return new_level
+    return None
+
+def calculate_logistics_cargo_weight(raw_key: str, units: int) -> int:
+    return int(units * GPU_RAW_DATA[raw_key].get("weight", 1))
+
+def calculate_logistics_delivery_cost(city: str, raw_key: str, units: int, resource_cost: int) -> int:
+    cargo_weight = calculate_logistics_cargo_weight(raw_key, units)
+    distance = get_distance(LOGISTICS_ORIGIN_CITY, city)
+    return max(2500, int(resource_cost * 0.10 + cargo_weight * 2 + distance * 5000))
+
+def get_logistics_base_time(distance: int) -> int:
+    if distance <= 0:
+        return 180
+    if distance == 1:
+        return 300
+    if distance == 2:
+        return 420
+    return 600
+
+def logistics_overload_info(cargo_weight: int, capacity: int):
+    capacity = max(1, int(capacity or 1))
+    if cargo_weight <= capacity:
+        return 0.0, 1.0, True
+    overload_percent = ((cargo_weight - capacity) / capacity) * 100
+    if overload_percent <= 10:
+        return overload_percent, 1.25, True
+    if overload_percent <= 25:
+        return overload_percent, 1.5, True
+    if overload_percent <= 50:
+        return overload_percent, 2.0, True
+    return overload_percent, None, False
+
+def calculate_logistics_time(city: str, speed: float, capacity: int, cargo_weight: int, force_npc: bool = False):
+    distance = get_distance(LOGISTICS_ORIGIN_CITY, city)
+    base = int(get_logistics_base_time(distance) / max(0.1, float(speed or 0.1)))
+    overload_percent, multiplier, can_drive = logistics_overload_info(cargo_weight, capacity)
+    if not can_drive:
+        if not force_npc:
+            return None, base, 0, overload_percent, False
+        multiplier = 2.0
+        can_drive = True
+    total = int(base * multiplier)
+    extra = max(0, total - base)
+    return total, base, extra, overload_percent, can_drive
+
+def format_logistics_time(city: str, speed: float, capacity: int, cargo_weight: int):
+    total, base, extra, overload_percent, can_drive = calculate_logistics_time(city, speed, capacity, cargo_weight)
+    if not can_drive:
+        return (
+            f"На вашем грузовкие нельзя совершить такой тяжелый заказ. Перегруз слишком велик({overload_percent:.1f}%) "
+            f"улучшите или смените грузовик или выберите заказ легче."
+        ), False
+    return f"{format_seconds(total)} + {format_seconds(extra)}(перегруз {overload_percent:.1f}%)", True
+
+def truck_display_name(vehicle: dict) -> str:
+    if not vehicle:
+        return "не выбран"
+    name = vehicle["name"]
+    if vehicle.get("source") == "rent":
+        return f"{name} rent ({vehicle.get('rent_remaining', 0)} поезд.)"
+    return name
+
+def get_selected_logistics_vehicle(context: ContextTypes.DEFAULT_TYPE, uid: int):
+    selected = context.user_data.get(f"logistics_vehicle_{uid}")
+    if selected and selected.get("source") == "own":
+        garage_id = selected.get("garage_id")
+        cursor.execute("""
+            SELECT id, car, speed, truck_level, cargo_capacity, speed_bonus_percent, capacity_bonus_percent
+            FROM garage WHERE id=? AND owner=?
+        """, (garage_id, uid))
+        row = cursor.fetchone()
+        if row and row[1] in LOGISTICS_TRUCKS:
+            gid, car, speed, truck_level, capacity, speed_bonus, capacity_bonus = row
+            speed_bonus = speed_bonus or 0
+            capacity_bonus = capacity_bonus or 0
+            final_speed = float(speed) * (1 + speed_bonus / 100.0)
+            final_capacity = int(capacity * (1 + capacity_bonus / 100.0))
+            return {
+                "source": "own", "garage_id": gid, "name": car, "speed": final_speed,
+                "base_speed": float(speed), "level": truck_level, "capacity": final_capacity,
+                "base_capacity": capacity, "speed_bonus": speed_bonus, "capacity_bonus": capacity_bonus,
+                "rent_remaining": 0,
+            }
+        context.user_data.pop(f"logistics_vehicle_{uid}", None)
+
+    player = get_player(uid)
+    rent_truck = player.get("logistics_rent_truck", "")
+    rent_remaining = player.get("logistics_rent_remaining", 0)
+    if rent_truck in LOGISTICS_TRUCKS and rent_remaining > 0:
+        meta = LOGISTICS_TRUCKS[rent_truck]
+        return {
+            "source": "rent", "name": rent_truck, "speed": meta["speed"], "base_speed": meta["speed"],
+            "level": meta["truck_level"], "capacity": meta["cargo_capacity"], "base_capacity": meta["cargo_capacity"],
+            "speed_bonus": 0, "capacity_bonus": 0, "rent_remaining": rent_remaining,
+        }
+    return None
+
+def set_selected_logistics_vehicle(context: ContextTypes.DEFAULT_TYPE, uid: int, vehicle: dict):
+    context.user_data[f"logistics_vehicle_{uid}"] = vehicle
+
+def get_active_logistics_order(uid: int):
+    cursor.execute("""
+        SELECT id, city, order_code, resource_key, units, delivery_cost, cargo_weight, vehicle_name,
+               delivery_started_at, delivery_eta_seconds, reward_amount, driver_type
+        FROM gpu_factory_orders
+        WHERE status='in_delivery' AND driver_id=?
+        ORDER BY id DESC LIMIT 1
+    """, (uid,))
+    row = cursor.fetchone()
+    return row
+
+def get_order_business_name(factory_id: int, city: str) -> str:
+    cursor.execute("SELECT name FROM gpu_factories WHERE id=?", (factory_id,))
+    row = cursor.fetchone()
+    if row and row[0]:
+        return row[0]
+    return f"Завод видеокарт | {city}"
+
+def add_player_item(uid: int, item_key: str, amount: int = 1):
+    cursor.execute("INSERT OR IGNORE INTO player_items(user_id, item_key, amount) VALUES(?,?,0)", (uid, item_key))
+    cursor.execute("UPDATE player_items SET amount=amount+? WHERE user_id=? AND item_key=?", (amount, uid, item_key))
+    conn.commit()
+
+async def grant_logistics_rare_reward(driver_id: int, factory_id: int, order_code: str, app):
+    if random.random() >= LOGISTICS_REWARD_CHANCE:
+        return
+    if random.random() < 0.25:
+        cursor.execute("UPDATE gpu_factories SET warehouse_bonus_percent = warehouse_bonus_percent + 25 WHERE id=?", (factory_id,))
+        conn.commit()
+        try:
+            await app.bot.send_message(
+                chat_id=driver_id,
+                text=f"🎁 Редкая награда за доставку #{order_code}: план расширения склада. Склад бизнеса расширен на +25%."
+            )
+        except Exception:
+            pass
+        return
+    item_key, label = random.choice(LOGISTICS_REWARD_ITEMS)
+    add_player_item(driver_id, item_key, 1)
+    try:
+        await app.bot.send_message(chat_id=driver_id, text=f"🎁 Редкая награда за доставку #{order_code}: {label}")
+    except Exception:
+        pass
+
+async def logistics_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    player = get_player(uid)
+    vehicle = get_selected_logistics_vehicle(context, uid)
+    page = context.user_data.get("logistics_page", 0)
+
+    cursor.execute("""
+        SELECT id, order_code, city, factory_id
+        FROM gpu_factory_orders
+        WHERE status='pending'
+        ORDER BY id DESC
+    """)
+    orders = cursor.fetchall()
+    total_pages = max(1, math.ceil(len(orders) / 5))
+    page = max(0, min(page, total_pages - 1))
+    context.user_data["logistics_page"] = page
+    chunk = orders[page*5:(page+1)*5]
+
+    percent = logistics_percent(player["logistics_level"], rented=vehicle and vehicle.get("source") == "rent")
+    text = (
+        f"🚚 Логистика\n\n"
+        f"Уровень логиста: {player['logistics_level']}\n"
+        f"Выполнено доставок: {player['logistics_done']}\n"
+        f"Текущий процент заработка: {percent}%\n\n"
+        f"Текущий транспорт: {truck_display_name(vehicle)}\n\n"
+    )
+    if not chunk:
+        text += "Свободных заказов нет.\n"
+    kb = []
+    for order_id, order_code, city, factory_id in chunk:
+        business = get_order_business_name(factory_id, city)
+        kb.append([InlineKeyboardButton(f"#{order_code} {business}", callback_data=f"logistics_order_{order_id}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data="logistics_page_prev"))
+    nav.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("➡️", callback_data="logistics_page_next"))
+    kb.append(nav)
+    kb.append([InlineKeyboardButton("🚚 Выбрать грузовик", callback_data="logistics_choose_truck")])
+    kb.append([InlineKeyboardButton("⏳️Обновить", callback_data="logistics_menu")])
+    kb.append([InlineKeyboardButton("🧾 Текущий заказ", callback_data="logistics_current_order")])
+    kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="work_menu")])
+    await render_text(query.message, text, reply_markup=InlineKeyboardMarkup(kb))
+
+async def logistics_page_prev(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["logistics_page"] = max(0, context.user_data.get("logistics_page", 0) - 1)
+    await logistics_menu(update, context)
+
+async def logistics_page_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["logistics_page"] = context.user_data.get("logistics_page", 0) + 1
+    await logistics_menu(update, context)
+
+async def logistics_choose_truck(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    kb = [
+        [InlineKeyboardButton("Из своих грузовиков", callback_data="logistics_own_trucks")],
+        [InlineKeyboardButton("Арендовать грузовик", callback_data="logistics_rent_menu")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="logistics_menu")]
+    ]
+    await render_text(query.message, "🚚 Выбор грузовика", reply_markup=InlineKeyboardMarkup(kb))
+
+async def logistics_own_trucks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    cursor.execute("""
+        SELECT id, car, speed, truck_level, cargo_capacity, speed_bonus_percent, capacity_bonus_percent
+        FROM garage WHERE owner=?
+    """, (uid,))
+    rows = [r for r in cursor.fetchall() if r[1] in LOGISTICS_TRUCKS]
+    if not rows:
+        await render_text(query.message, "У вас нет своих грузовиков.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="logistics_choose_truck")]]))
+        return
+    text = "Выберите свой грузовик:\n\n"
+    kb = []
+    for gid, car, speed, level, capacity, speed_bonus, capacity_bonus in rows:
+        text += f"{gid} | {car} | уровень {level} | скорость {speed} | груз {capacity} | бонусы {speed_bonus or 0}%/{capacity_bonus or 0}%\n"
+        kb.append([InlineKeyboardButton(f"Выбрать {car}", callback_data=f"logistics_select_own_{gid}")])
+    kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="logistics_choose_truck")])
+    await render_text(query.message, text, reply_markup=InlineKeyboardMarkup(kb))
+
+async def logistics_select_own(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    gid = int(query.data.replace("logistics_select_own_", ""))
+    cursor.execute("SELECT car FROM garage WHERE id=? AND owner=?", (gid, uid))
+    row = cursor.fetchone()
+    if not row or row[0] not in LOGISTICS_TRUCKS:
+        await query.answer("Грузовик не найден")
+        return
+    set_selected_logistics_vehicle(context, uid, {"source": "own", "garage_id": gid})
+    await render_text(query.message, f"Выбран грузовик: {row[0]}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚚 Логистика", callback_data="logistics_menu")]]))
+
+async def logistics_rent_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    trucks = list(LOGISTICS_TRUCKS.keys())
+    idx = context.user_data.get("logistics_rent_i", 0) % len(trucks)
+    context.user_data["logistics_rent_i"] = idx
+    truck = trucks[idx]
+    meta = LOGISTICS_TRUCKS[truck]
+    rent_cost = int(meta["price"] * 0.10)
+    player_level = get_player(uid)["logistics_level"]
+    lock_text = f"\nТребуется уровень логиста: {meta['truck_level']}" if player_level < meta["truck_level"] else ""
+    caption = (
+        f"{truck}\n\n"
+        f"Уровень грузовика: {meta['truck_level']}\n"
+        f"Скорость: {meta['speed']}\n"
+        f"Грузоподъемность: {meta['cargo_capacity']}\n"
+        f"Стоимость аренды на 3 поездки: {rent_cost}$"
+        f"{lock_text}"
+    )
+    kb = [
+        [InlineKeyboardButton("⬅️", callback_data="logistics_rent_prev"),
+         InlineKeyboardButton("Арендовать", callback_data=f"logistics_rent_pick_{idx}"),
+         InlineKeyboardButton("➡️", callback_data="logistics_rent_next")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="logistics_choose_truck")]
+    ]
+    await render_photo(query.message, meta["img"], caption, reply_markup=InlineKeyboardMarkup(kb))
+
+async def logistics_rent_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["logistics_rent_i"] = (context.user_data.get("logistics_rent_i", 0) + 1) % len(LOGISTICS_TRUCKS)
+    await logistics_rent_menu(update, context)
+
+async def logistics_rent_prev(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["logistics_rent_i"] = (context.user_data.get("logistics_rent_i", 0) - 1) % len(LOGISTICS_TRUCKS)
+    await logistics_rent_menu(update, context)
+
+async def logistics_rent_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    idx = int(query.data.replace("logistics_rent_pick_", ""))
+    trucks = list(LOGISTICS_TRUCKS.keys())
+    truck = trucks[idx]
+    meta = LOGISTICS_TRUCKS[truck]
+    player = get_player(uid)
+    if player["logistics_level"] < meta["truck_level"]:
+        await query.answer(f"Нужен уровень логиста {meta['truck_level']}")
+        return
+    rent_cost = int(meta["price"] * 0.10)
+    if player["money"] < rent_cost:
+        await query.answer("Недостаточно денег")
+        return
+    add_money(uid, -rent_cost)
+    cursor.execute("UPDATE players SET logistics_rent_truck=?, logistics_rent_remaining=? WHERE user_id=?", (truck, LOGISTICS_RENT_TRIPS, uid))
+    conn.commit()
+    set_selected_logistics_vehicle(context, uid, {"source": "rent", "name": truck})
+    await render_text(query.message, f"Вы арендовали {truck} на 3 поездки за {rent_cost}$", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚚 Логистика", callback_data="logistics_menu")]]))
+
+async def logistics_order_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.replace("logistics_order_", ""))
+    uid = query.from_user.id
+    cursor.execute("""
+        SELECT id, city, factory_id, owner_id, order_code, resource_key, units, resource_cost, delivery_cost, status, cargo_weight
+        FROM gpu_factory_orders WHERE id=?
+    """, (order_id,))
+    row = cursor.fetchone()
+    if not row:
+        await query.answer("Заказ не найден")
+        return
+    _, city, factory_id, owner_id, order_code, resource_key, units, resource_cost, delivery_cost, status, cargo_weight = row
+    business = get_order_business_name(factory_id, city)
+    vehicle = get_selected_logistics_vehicle(context, uid)
+    player = get_player(uid)
+    if not cargo_weight:
+        cargo_weight = calculate_logistics_cargo_weight(resource_key, units)
+    if vehicle:
+        rented = vehicle.get("source") == "rent"
+        percent = logistics_percent(player["logistics_level"], rented=rented)
+        reward = int(delivery_cost * percent / 100)
+        time_text, can_drive = format_logistics_time(city, vehicle["speed"], vehicle["capacity"], cargo_weight)
+        vehicle_text = truck_display_name(vehicle)
+    else:
+        percent = logistics_percent(player["logistics_level"], rented=False)
+        reward = 0
+        time_text = "Сначала выберите грузовик."
+        can_drive = False
+        vehicle_text = "не выбран"
+    text = (
+        f"🚚  заказ #{order_code}\n\n"
+        f"ORDER #{order_code}\n"
+        f"Заказчик:{business}\n"
+        f"Груз: {GPU_RAW_DATA[resource_key]['name']} x{units}\n"
+        f"Вес: {cargo_weight}\n"
+        f"Ваш Транспорт: {vehicle_text}\n"
+        f"Время доставки:{time_text}\n"
+        f"Оплата: {reward}$ ({percent}% от стоимости доставки {delivery_cost}$)"
+    )
+    kb = [[InlineKeyboardButton("📦Принять", callback_data=f"logistics_accept_{order_id}")],
+          [InlineKeyboardButton("⬅️Назад", callback_data="logistics_menu")]]
+    await render_text(query.message, text, reply_markup=InlineKeyboardMarkup(kb))
+
+async def logistics_accept_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    order_id = int(query.data.replace("logistics_accept_", ""))
+    vehicle = get_selected_logistics_vehicle(context, uid)
+    if not vehicle:
+        await query.answer("Сначала выберите грузовик", show_alert=True)
+        return
+    if get_active_logistics_order(uid):
+        await query.answer("У вас уже есть текущий заказ", show_alert=True)
+        return
+    cursor.execute("""
+        SELECT id, city, factory_id, owner_id, owner_name, order_code, resource_key, units, delivery_cost, status, cargo_weight
+        FROM gpu_factory_orders WHERE id=?
+    """, (order_id,))
+    row = cursor.fetchone()
+    if not row:
+        await query.answer("Заказ не найден", show_alert=True)
+        return
+    _, city, factory_id, owner_id, owner_name, order_code, resource_key, units, delivery_cost, status, cargo_weight = row
+    if status != "pending":
+        await query.answer("Заказ уже недоступен", show_alert=True)
+        return
+    if owner_id == uid:
+        await query.answer("Нельзя доставлять свой заказ", show_alert=True)
+        return
+    if not cargo_weight:
+        cargo_weight = calculate_logistics_cargo_weight(resource_key, units)
+    total_seconds, base, extra, overload_percent, can_drive = calculate_logistics_time(city, vehicle["speed"], vehicle["capacity"], cargo_weight)
+    if not can_drive:
+        msg = f"На вашем грузовкие нельзя совершить такой тяжелый заказ. Перегруз слишком велик({overload_percent:.1f}%) улучшите или смените грузовик или выберите заказ легче."
+        await query.answer(msg, show_alert=True)
+        return
+    player = get_player(uid)
+    percent = logistics_percent(player["logistics_level"], rented=vehicle.get("source") == "rent")
+    reward = int(delivery_cost * percent / 100)
+    driver_name = query.from_user.first_name or str(uid)
+    now = int(time.time())
+    cursor.execute("""
+        UPDATE gpu_factory_orders
+        SET status='in_delivery', driver_id=?, driver_name=?, driver_type=?, vehicle_name=?, vehicle_type=?,
+            vehicle_speed=?, vehicle_capacity=?, cargo_weight=?, delivery_started_at=?, delivery_eta_seconds=?, reward_amount=?
+        WHERE id=? AND status='pending'
+    """, (
+        uid, driver_name, vehicle.get("source", "own"), vehicle["name"], "truck", vehicle["speed"], vehicle["capacity"],
+        cargo_weight, now, total_seconds, reward, order_id
+    ))
+    if cursor.rowcount == 0:
+        conn.commit()
+        await query.answer("Заказ уже взял другой логист", show_alert=True)
+        return
+    conn.commit()
+    start_msg = None
+    try:
+        start_msg = await context.bot.send_message(
+            chat_id=owner_id,
+            text=(
+                f"📦 {owner_name or owner_id}, сотрудник службы доставки {driver_name} начал работать по твоему заказу #{order_code}.\n"
+                f"Он будет доставлен примерно через: {format_seconds(total_seconds)}"
+            )
+        )
+    except Exception:
+        pass
+    if start_msg:
+        cursor.execute("UPDATE gpu_factory_orders SET start_notice_chat_id=?, start_notice_message_id=? WHERE id=?", (start_msg.chat_id, start_msg.message_id, order_id))
+        conn.commit()
+    context.application.create_task(finish_logistics_order_later(order_id, context.application))
+    await query.answer("Заказ принят")
+    await render_text(query.message, f"🚚 Заказ #{order_code} принят.\nОсталось времени: {format_seconds(total_seconds)}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🧾 Текущий заказ", callback_data="logistics_current_order")]]))
+
+async def logistics_current_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    row = get_active_logistics_order(uid)
+    if not row:
+        await render_text(query.message, "Текущего заказа нет", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="logistics_menu")]]))
+        return
+    order_id, city, order_code, resource_key, units, delivery_cost, cargo_weight, vehicle_name, started_at, eta_seconds, reward, driver_type = row
+    left = max(0, int(started_at + eta_seconds - time.time()))
+    text = (
+        f"🚚 Текущий заказ\n\n"
+        f"ORDER #{order_code}\n"
+        f"Маршрут: Шахта → Завод в {city}\n"
+        f"Груз: {GPU_RAW_DATA[resource_key]['name']} x{units}\n"
+        f"Вес: {cargo_weight}\n"
+        f"Транспорт: {vehicle_name}\n"
+        f"Осталось: {format_seconds(left)}\n"
+        f"Оплата: {reward}$"
+    )
+    await render_text(query.message, text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Обновить ⏳", callback_data="logistics_current_order")], [InlineKeyboardButton("⬅️ Назад", callback_data="logistics_menu")]]))
+
+async def finish_logistics_order_later(order_id: int, app):
+    cursor.execute("SELECT delivery_started_at, delivery_eta_seconds FROM gpu_factory_orders WHERE id=?", (order_id,))
+    row = cursor.fetchone()
+    if not row:
+        return
+    started_at, eta_seconds = row
+    seconds = max(1, int((started_at or int(time.time())) + (eta_seconds or 1) - time.time()))
+    await asyncio.sleep(seconds)
+    await finalize_logistics_order(order_id, app)
+
+async def finalize_logistics_order(order_id: int, app):
+    cursor.execute("""
+        SELECT id, city, factory_id, owner_id, owner_name, order_code, resource_key, units, status,
+               driver_id, driver_name, driver_type, reward_amount, start_notice_chat_id, start_notice_message_id
+        FROM gpu_factory_orders WHERE id=?
+    """, (order_id,))
+    row = cursor.fetchone()
+    if not row:
+        return
+    (oid, city, factory_id, owner_id, owner_name, order_code, resource_key, units, status,
+     driver_id, driver_name, driver_type, reward_amount, notice_chat_id, notice_message_id) = row
+    if status != "in_delivery":
+        return
+    now = int(time.time())
+    suffix = resource_key.split("_")[1]
+    stored_key = f"stored_{suffix}"
+    cursor.execute(f"UPDATE gpu_factories SET {stored_key} = {stored_key} + ? WHERE id=?", (units, factory_id))
+    final_status = "npc_delivered" if driver_type == "npc" else "delivered"
+    cursor.execute("UPDATE gpu_factory_orders SET status=?, delivered_at=? WHERE id=?", (final_status, now, order_id))
+    conn.commit()
+
+    if notice_chat_id and notice_message_id:
+        try:
+            await app.bot.delete_message(chat_id=notice_chat_id, message_id=notice_message_id)
+        except Exception:
+            pass
+
+    if driver_type == "npc":
+        if owner_id:
+            try:
+                await app.bot.send_message(
+                    chat_id=owner_id,
+                    text=f"📦 Твой заказ #{order_code} был доставлен службой NPC-логистики.\nСырьё отгружено на склад бизнеса."
+                )
+            except Exception:
+                pass
+        return
+
+    if driver_id:
+        add_money(driver_id, reward_amount or 0)
+        if order_code.startswith("DELIVERY"):
+            add_money(driver_id, 50000000)
+        new_level = add_logistics_delivery(driver_id)
+        set_city(driver_id, city)
+        if driver_type == "rent":
+            cursor.execute("UPDATE players SET logistics_rent_remaining = MAX(logistics_rent_remaining - 1, 0) WHERE user_id=?", (driver_id,))
+            cursor.execute("UPDATE players SET logistics_rent_truck='' WHERE user_id=? AND logistics_rent_remaining<=0", (driver_id,))
+            conn.commit()
+        try:
+            msg = (
+                f"✅ Доставка завершена\n\n"
+                f"ORDER #{order_code}\n"
+                f"Груз: {GPU_RAW_DATA[resource_key]['name']} x{units}\n"
+                f"Получено: {reward_amount}$"
+            )
+            if order_code.startswith("DELIVERY"):
+                msg += "\n🎉 Пасхалка DELIVERY: дополнительно получено 50000000$"
+            if new_level:
+                msg += f"\n🎉 Уровень логиста повышен! Теперь ваш уровень: {new_level}"
+            await app.bot.send_message(chat_id=driver_id, text=msg)
+        except Exception:
+            pass
+        await grant_logistics_rare_reward(driver_id, factory_id, order_code, app)
+
+    if owner_id:
+        try:
+            await app.bot.send_message(
+                chat_id=owner_id,
+                text=(
+                    f"📦 {owner_name or owner_id}, сотрудник службы доставки {driver_name} звершил работать по твоему заказу #{order_code}.\n"
+                    f"Сырье отгружено на склад бизнесса"
+                ),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💰Чаевые", callback_data=f"logistics_tip_{order_id}"),
+                     InlineKeyboardButton("🆗 хорошо", callback_data=f"logistics_notice_ok_{order_id}")]
+                ])
+            )
+        except Exception:
+            pass
+
+async def logistics_tip_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.replace("logistics_tip_", ""))
+    uid = query.from_user.id
+    cursor.execute("SELECT owner_id, driver_id, status, tip_amount FROM gpu_factory_orders WHERE id=?", (order_id,))
+    row = cursor.fetchone()
+    if not row:
+        await query.answer("Заказ не найден")
+        return
+    owner_id, driver_id, status, tip_amount = row
+    if owner_id != uid:
+        await query.answer("Чаевые может оставить только заказчик")
+        return
+    if status != "delivered" or not driver_id:
+        await query.answer("Чаевые доступны только после доставки игроком")
+        return
+    if tip_amount:
+        await query.answer("Чаевые уже оставлены")
+        return
+    context.user_data["text_state"] = STATE_PREFIXES["logistics_tip"] + str(order_id)
+    await render_text(
+        query.message,
+        'Введите сумму не более 50000$ и напишите текст в одном сообщении.\n\nПример:"6700 Быстро, спасибо"',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="main")]])
+    )
+
+async def logistics_notice_ok(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Ок")
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+async def handle_logistics_tip_text(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: int):
+    uid = update.effective_user.id
+    raw = update.message.text.strip()
+    parts = raw.split(maxsplit=1)
+    if not parts or not parts[0].isdigit():
+        await update.message.reply_text("Введите сумму числом. Например: 6700 Быстро, спасибо")
+        return
+    amount = int(parts[0])
+    message = parts[1].strip() if len(parts) > 1 and parts[1].strip() else "спасибо за быструю доставку!"
+    if amount <= 0 or amount > 50000:
+        await update.message.reply_text("Сумма чаевых должна быть от 1$ до 50000$.")
+        return
+    cursor.execute("""
+        SELECT owner_id, driver_id, driver_name, order_code, status, tip_amount
+        FROM gpu_factory_orders WHERE id=?
+    """, (order_id,))
+    row = cursor.fetchone()
+    if not row:
+        await update.message.reply_text("Заказ не найден.")
+        context.user_data.pop("text_state", None)
+        return
+    owner_id, driver_id, driver_name, order_code, status, tip_amount = row
+    if owner_id != uid:
+        await update.message.reply_text("Чаевые может оставить только заказчик.")
+        context.user_data.pop("text_state", None)
+        return
+    if status != "delivered" or not driver_id:
+        await update.message.reply_text("Чаевые доступны только после доставки игроком.")
+        context.user_data.pop("text_state", None)
+        return
+    if tip_amount:
+        await update.message.reply_text("Чаевые уже оставлены.")
+        context.user_data.pop("text_state", None)
+        return
+    if get_money(uid) < amount:
+        await update.message.reply_text("Недостаточно денег для чаевых.")
+        return
+    add_money(uid, -amount)
+    add_money(driver_id, amount)
+    cursor.execute("UPDATE gpu_factory_orders SET tip_amount=?, tip_message=?, tip_created_at=? WHERE id=?", (amount, message, int(time.time()), order_id))
+    conn.commit()
+    context.user_data.pop("text_state", None)
+    await update.message.reply_text(f"✅ Чаевые отправлены доставщику {driver_name}\nСумма: {amount}$\nСообщение: {message}")
+    try:
+        await context.bot.send_message(chat_id=driver_id, text=f"💸 Вам оставили чаевые за доставку #{order_code}\n\nСумма: {amount}$\nСообщение: {message}")
+    except Exception:
+        pass
 
 # ---------------- BANK ----------------
 
@@ -4355,7 +5125,19 @@ async def dealership(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = CARS[car]
     cursor.execute("SELECT stock FROM dealership WHERE car=?", (car,))
     stock = cursor.fetchone()[0]
-    caption = f"{car}\n\nКласс: {data['class']}\nСкорость: {data['speed']}\nЦена: {data['price']}$\nВ наличии: {stock}"
+    if data.get("type") == "truck":
+        caption = (
+            f"{car}\n\n"
+            f"Класс: {data['class']}\n"
+            f"Уровень грузовика: {data['truck_level']}\n"
+            f"Требуется уровень логиста: {data['truck_level']}\n"
+            f"Скорость: {data['speed']}\n"
+            f"Грузоподъемность: {data['cargo_capacity']}\n"
+            f"Цена: {data['price']}$\n"
+            f"В наличии: {stock}"
+        )
+    else:
+        caption = f"{car}\n\nКласс: {data['class']}\nСкорость: {data['speed']}\nЦена: {data['price']}$\nВ наличии: {stock}"
     kb = [
         [InlineKeyboardButton("⬅️", callback_data="dealer_prev"),
          InlineKeyboardButton("Купить", callback_data=f"buy_{car}"),
@@ -4382,7 +5164,12 @@ async def buy_car(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
     car = query.data.replace("buy_", "")
     money = get_money(uid)
-    price = CARS[car]["price"]
+    data = CARS[car]
+    price = data["price"]
+
+    if data.get("type") == "truck" and get_player(uid)["logistics_level"] < data["truck_level"]:
+        await query.answer(f"Нужен уровень логиста {data['truck_level']}")
+        return
 
     if money < price:
         await query.answer("Недостаточно денег")
@@ -4396,7 +5183,10 @@ async def buy_car(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cursor.execute("UPDATE players SET money=money-? WHERE user_id=?", (price, uid))
     cursor.execute("UPDATE dealership SET stock=stock-1 WHERE car=?", (car,))
-    cursor.execute("INSERT INTO garage(owner,car,speed) VALUES(?,?,?)", (uid, car, CARS[car]["speed"]))
+    cursor.execute(
+        "INSERT INTO garage(owner,car,speed,vehicle_type,truck_level,cargo_capacity,speed_bonus_percent,capacity_bonus_percent) VALUES(?,?,?,?,?,?,0,0)",
+        (uid, car, data["speed"], data.get("type", "car"), data.get("truck_level", 0), data.get("cargo_capacity", 0))
+    )
     conn.commit()
 
     await render_text(query.message, f"Вы купили: {car}\nВы потратили: {price}$", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="city_menu")]]))
@@ -4404,7 +5194,7 @@ async def buy_car(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def garage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    cursor.execute("SELECT id, car, speed FROM garage WHERE owner=?", (query.from_user.id,))
+    cursor.execute("SELECT id, car, speed, vehicle_type, truck_level, cargo_capacity, speed_bonus_percent, capacity_bonus_percent FROM garage WHERE owner=?", (query.from_user.id,))
     cars = cursor.fetchall()
     if not cars:
         await render_text(query.message, "🚘 Гараж пуст", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="main")]]))
@@ -4412,8 +5202,11 @@ async def garage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = "🚘 Ваш гараж\n\n"
     kb = []
-    for cid, car, speed in cars:
-        text += f"{cid} | {car} | speed {speed}\n"
+    for cid, car, speed, vehicle_type, truck_level, cargo_capacity, speed_bonus, capacity_bonus in cars:
+        if vehicle_type == "truck" or car in LOGISTICS_TRUCKS:
+            text += f"{cid} | {car} | truck lvl {truck_level} | speed {speed} | cargo {cargo_capacity} | speed bonus {speed_bonus}% | cargo bonus {capacity_bonus}%\n"
+        else:
+            text += f"{cid} | {car} | speed {speed}\n"
         kb.append([InlineKeyboardButton(f"Продать {car}", callback_data=f"sell_{cid}")])
     kb.append([InlineKeyboardButton("⬅️ Назад", callback_data="main")])
     await render_text(query.message, text, reply_markup=InlineKeyboardMarkup(kb))
@@ -4552,6 +5345,11 @@ async def price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text_state:
         uid = update.effective_user.id
         msg = update.message.text.strip()
+        if text_state.startswith(STATE_PREFIXES["logistics_tip"]):
+            order_id = int(text_state.split(":", 1)[1])
+            await handle_logistics_tip_text(update, context, order_id)
+            return
+
         if text_state.startswith(STATE_PREFIXES["factory_buy_name"]):
             city = text_state.split(":", 1)[1]
             cursor.execute("UPDATE gpu_factories SET name=? WHERE city=?", (msg[:40], city))
@@ -4578,17 +5376,19 @@ async def price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("На складе бизнеса не хватит места для такого заказа.")
                 return
             cost = units * meta["unit_price"]
-            if get_money(uid) < cost:
-                await update.message.reply_text(f"Недостаточно денег. Нужно {cost}$")
+            delivery_cost = calculate_logistics_delivery_cost(city, raw_key, units, cost)
+            total_cost = cost + delivery_cost
+            if get_money(uid) < total_cost:
+                await update.message.reply_text(f"Недостаточно денег. Нужно {total_cost}$")
                 return
-            add_money(uid, -cost)
+            add_money(uid, -total_cost)
             order_code = generate_deli_code()
             cursor.execute("""
-                INSERT INTO gpu_factory_orders(city, factory_id, owner_id, order_code, resource_key, units, resource_cost, delivery_cost, eta_seconds, status, created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)
-            """, (city, factory["id"], uid, order_code, raw_key, units, cost, 0, 3600, "pending", int(time.time())))
+                INSERT INTO gpu_factory_orders(city, factory_id, owner_id, owner_name, order_code, resource_key, units, resource_cost, delivery_cost, eta_seconds, status, created_at, cargo_weight)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (city, factory["id"], uid, update.effective_user.first_name or str(uid), order_code, raw_key, units, cost, delivery_cost, 3600, "pending", int(time.time()), calculate_logistics_cargo_weight(raw_key, units)))
             conn.commit()
-            # Easter egg
+            # Easter egg: заказчик получает 50кк сразу, доставщик получит 50кк при доставке игроком.
             if order_code.startswith("DELIVERY"):
                 add_money(uid, 50000000)
             context.user_data.pop("text_state", None)
@@ -4596,9 +5396,9 @@ async def price_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🧾 ORDER #{order_code}\n\n"
                 f"• кол-во единиц сырья — {units}\n"
                 f"• стоимость заказа — ${cost}\n"
-                f"• стоимость доставки — $0\n"
+                f"• стоимость доставки — ${delivery_cost}\n"
                 f"• примерное время доставки — в течение часа после оплаты\n\n"
-                f"TOTAL: ${cost}"
+                f"TOTAL: ${total_cost}"
             )
             return
 
@@ -4860,16 +5660,16 @@ async def confirm_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await render_text(query.message, "Нет данных для продажи", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="garage")]]))
         return
 
-    cursor.execute("SELECT car,speed,owner FROM garage WHERE id=?", (cid,))
+    cursor.execute("SELECT car,speed,owner,vehicle_type,truck_level,cargo_capacity,speed_bonus_percent,capacity_bonus_percent FROM garage WHERE id=?", (cid,))
     row = cursor.fetchone()
     if not row:
         await render_text(query.message, "Машина не найдена", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="garage")]]))
         return
 
-    car, speed, owner = row
+    car, speed, owner, vehicle_type, truck_level, cargo_capacity, speed_bonus, capacity_bonus = row
     seller_name = query.from_user.full_name or str(owner)
     cursor.execute("DELETE FROM garage WHERE id=?", (cid,))
-    cursor.execute("INSERT INTO car_market(car,seller,price,speed,seller_name) VALUES(?,?,?,?,?)", (car, owner, price, speed, seller_name))
+    cursor.execute("INSERT INTO car_market(car,seller,price,speed,seller_name,vehicle_type,truck_level,cargo_capacity,speed_bonus_percent,capacity_bonus_percent) VALUES(?,?,?,?,?,?,?,?,?,?)", (car, owner, price, speed, seller_name, vehicle_type, truck_level, cargo_capacity, speed_bonus, capacity_bonus))
     conn.commit()
 
     context.user_data.pop("sell_car", None)
@@ -4879,7 +5679,7 @@ async def confirm_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    cursor.execute("SELECT id,car,price,seller_name,speed FROM car_market ORDER BY id")
+    cursor.execute("SELECT id,car,price,seller_name,speed,vehicle_type,truck_level,cargo_capacity,speed_bonus_percent,capacity_bonus_percent FROM car_market ORDER BY id")
     cars = cursor.fetchall()
     if not cars:
         await render_text(query.message, "🏪 Авторынок пуст", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="city_menu")]]))
@@ -4887,9 +5687,17 @@ async def market(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     i = context.user_data.get("market_i", 0) % len(cars)
     context.user_data["market_i"] = i
-    cid, car, price, seller_name, speed = cars[i]
+    cid, car, price, seller_name, speed, vehicle_type, truck_level, cargo_capacity, speed_bonus, capacity_bonus = cars[i]
     data = CARS[car]
-    caption = f"{car}\n\nПродавец: {seller_name}\nЦена: {price}$\nЭлементы тюннинга:\n—\nСкорость: {speed}"
+    if vehicle_type == "truck" or car in LOGISTICS_TRUCKS:
+        caption = (
+            f"{car}\n\nПродавец: {seller_name}\nЦена: {price}$\n"
+            f"Тип: грузовик {truck_level} уровня\nСкорость: {speed}\n"
+            f"Грузоподъемность: {cargo_capacity}\n"
+            f"Бонус скорости: {speed_bonus}%\nБонус грузоподъемности: {capacity_bonus}%"
+        )
+    else:
+        caption = f"{car}\n\nПродавец: {seller_name}\nЦена: {price}$\nЭлементы тюннинга:\n—\nСкорость: {speed}"
     kb = [
         [InlineKeyboardButton("⬅️", callback_data="market_prev"),
          InlineKeyboardButton("Купить", callback_data=f"market_buy_{cid}"),
@@ -4924,13 +5732,13 @@ async def market_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     cid = int(query.data.replace("market_buy_", ""))
-    cursor.execute("SELECT car,price,seller,speed FROM car_market WHERE id=?", (cid,))
+    cursor.execute("SELECT car,price,seller,speed,vehicle_type,truck_level,cargo_capacity,speed_bonus_percent,capacity_bonus_percent FROM car_market WHERE id=?", (cid,))
     row = cursor.fetchone()
     if not row:
         await query.answer("Лот уже куплен")
         return
 
-    car, price, seller, speed = row
+    car, price, seller, speed, vehicle_type, truck_level, cargo_capacity, speed_bonus, capacity_bonus = row
     uid = query.from_user.id
     money = get_money(uid)
     if money < price:
@@ -4940,7 +5748,7 @@ async def market_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("UPDATE players SET money=money-? WHERE user_id=?", (price, uid))
     cursor.execute("UPDATE players SET money=money+? WHERE user_id=?", (price, seller))
     cursor.execute("DELETE FROM car_market WHERE id=?", (cid,))
-    cursor.execute("INSERT INTO garage(owner,car,speed) VALUES(?,?,?)", (uid, car, speed))
+    cursor.execute("INSERT INTO garage(owner,car,speed,vehicle_type,truck_level,cargo_capacity,speed_bonus_percent,capacity_bonus_percent) VALUES(?,?,?,?,?,?,?,?)", (uid, car, speed, vehicle_type, truck_level, cargo_capacity, speed_bonus, capacity_bonus))
     conn.commit()
 
     await render_text(query.message, f"Вы купили: {car}\nВы потратили: {price}$", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚘 В гараж", callback_data="garage")]]))
@@ -4951,34 +5759,51 @@ async def market_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_factory_orders_loop(app):
     while True:
         try:
+            now = int(time.time())
+
+            # Pending orders wait for real logistics players for 15 minutes, then NPC takes them.
             cursor.execute("""
-                SELECT id, city, owner_id, order_code, resource_key, units, created_at, eta_seconds, status
+                SELECT id, city, owner_id, owner_name, order_code, resource_key, units, created_at, cargo_weight
                 FROM gpu_factory_orders
                 WHERE status='pending'
             """)
-            orders = cursor.fetchall()
-            now = int(time.time())
-            for order_id, city, owner_id, order_code, resource_key, units, created_at, eta_seconds, status in orders:
-                if now - created_at < eta_seconds:
+            pending_orders = cursor.fetchall()
+            npc_truck = LOGISTICS_TRUCKS["Ford F-250"]
+            for order_id, city, owner_id, owner_name, order_code, resource_key, units, created_at, cargo_weight in pending_orders:
+                if now - created_at < LOGISTICS_NPC_WAIT_SECONDS:
                     continue
-                factory = gpu_factory_row(city)
-                suffix = resource_key.split("_")[1]
-                stored_key = f"stored_{suffix}"
-                cursor.execute(f"UPDATE gpu_factories SET {stored_key} = {stored_key} + ? WHERE city=?", (units, city))
-                cursor.execute("UPDATE gpu_factory_orders SET status='delivered', delivered_at=? WHERE id=?", (now, order_id))
-                conn.commit()
-                if owner_id:
-                    try:
-                        await app.bot.send_message(
-                            chat_id=owner_id,
-                            text=(
-                                f"📦 {city}, твой заказ #{order_code} был успешно отгружен на склад бизнеса системной доставкой.\n"
-                                f"Сырье: {GPU_RAW_DATA[resource_key]['name']}\n"
-                                f"Количество: {units}"
+                if not cargo_weight:
+                    cargo_weight = calculate_logistics_cargo_weight(resource_key, units)
+                total_seconds, _, _, _, _ = calculate_logistics_time(city, npc_truck["speed"], npc_truck["cargo_capacity"], cargo_weight, force_npc=True)
+                cursor.execute("""
+                    UPDATE gpu_factory_orders
+                    SET status='in_delivery', driver_id=0, driver_name='NPC-логист', driver_type='npc',
+                        vehicle_name=?, vehicle_type='truck', vehicle_speed=?, vehicle_capacity=?, cargo_weight=?,
+                        delivery_started_at=?, delivery_eta_seconds=?, reward_amount=0
+                    WHERE id=? AND status='pending'
+                """, ("Ford F-250", npc_truck["speed"], npc_truck["cargo_capacity"], cargo_weight, now, total_seconds, order_id))
+                if cursor.rowcount:
+                    conn.commit()
+                    if owner_id:
+                        try:
+                            await app.bot.send_message(
+                                chat_id=owner_id,
+                                text=f"📦 Твой заказ #{order_code} будет доставлен службой NPC-логистики.\nСырьё будет отгружено на склад бизнеса."
                             )
-                        )
-                    except Exception:
-                        pass
+                        except Exception:
+                            pass
+
+            # Finish player and NPC deliveries whose timers are done.
+            cursor.execute("""
+                SELECT id, delivery_started_at, delivery_eta_seconds
+                FROM gpu_factory_orders
+                WHERE status='in_delivery'
+            """)
+            active_orders = cursor.fetchall()
+            for order_id, started_at, eta_seconds in active_orders:
+                if now < (started_at or now) + (eta_seconds or 0):
+                    continue
+                await finalize_logistics_order(order_id, app)
         except Exception as e:
             logging.exception("factory order loop error: %s", e)
         await asyncio.sleep(15)
@@ -5114,6 +5939,23 @@ def main():
     app.add_handler(CallbackQueryHandler(gpu_shop_markup, pattern="gpu_shop_markup_"))
     app.add_handler(CallbackQueryHandler(gpu_shop_collect, pattern="gpu_shop_collect_"))
     app.add_handler(CallbackQueryHandler(gpu_shop_stats, pattern="gpu_shop_stats_"))
+
+    app.add_handler(CallbackQueryHandler(logistics_menu, pattern="logistics_menu"))
+    app.add_handler(CallbackQueryHandler(logistics_page_prev, pattern="logistics_page_prev"))
+    app.add_handler(CallbackQueryHandler(logistics_page_next, pattern="logistics_page_next"))
+    app.add_handler(CallbackQueryHandler(logistics_choose_truck, pattern="logistics_choose_truck"))
+    app.add_handler(CallbackQueryHandler(logistics_own_trucks, pattern="logistics_own_trucks"))
+    app.add_handler(CallbackQueryHandler(logistics_select_own, pattern="logistics_select_own_"))
+    app.add_handler(CallbackQueryHandler(logistics_rent_menu, pattern="logistics_rent_menu"))
+    app.add_handler(CallbackQueryHandler(logistics_rent_next, pattern="logistics_rent_next"))
+    app.add_handler(CallbackQueryHandler(logistics_rent_prev, pattern="logistics_rent_prev"))
+    app.add_handler(CallbackQueryHandler(logistics_rent_pick, pattern="logistics_rent_pick_"))
+    app.add_handler(CallbackQueryHandler(logistics_order_view, pattern="logistics_order_"))
+    app.add_handler(CallbackQueryHandler(logistics_accept_order, pattern="logistics_accept_"))
+    app.add_handler(CallbackQueryHandler(logistics_current_order, pattern="logistics_current_order"))
+    app.add_handler(CallbackQueryHandler(logistics_tip_start, pattern="logistics_tip_"))
+    app.add_handler(CallbackQueryHandler(logistics_notice_ok, pattern="logistics_notice_ok_"))
+
     app.add_handler(CallbackQueryHandler(noop, pattern="noop"))
 
     app.add_handler(CallbackQueryHandler(work_menu, pattern="work_menu"))
