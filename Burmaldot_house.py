@@ -24,7 +24,7 @@ from telegram.ext import (
 
 TOKEN = "8550175395:AAEgfAlvO6VrORJn-5SEn80MTgu2NcSLMu8"
 
-DEBUG_ADMIN_ID = 123456789
+DEBUG_ADMIN_ID = 1836467497
 
 logging.basicConfig(level=logging.INFO)
 
